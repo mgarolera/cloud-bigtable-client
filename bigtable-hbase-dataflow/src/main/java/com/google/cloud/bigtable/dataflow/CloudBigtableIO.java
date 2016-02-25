@@ -64,9 +64,11 @@ import com.google.cloud.dataflow.sdk.coders.CoderRegistry;
 import com.google.cloud.dataflow.sdk.io.BoundedSource;
 import com.google.cloud.dataflow.sdk.io.BoundedSource.BoundedReader;
 import com.google.cloud.dataflow.sdk.options.PipelineOptions;
+import com.google.cloud.dataflow.sdk.transforms.Aggregator;
 import com.google.cloud.dataflow.sdk.transforms.DoFn;
 import com.google.cloud.dataflow.sdk.transforms.PTransform;
 import com.google.cloud.dataflow.sdk.transforms.ParDo;
+import com.google.cloud.dataflow.sdk.transforms.Sum;
 import com.google.cloud.dataflow.sdk.values.KV;
 import com.google.cloud.dataflow.sdk.values.PCollection;
 import com.google.cloud.dataflow.sdk.values.PDone;
@@ -736,9 +738,13 @@ public class CloudBigtableIO {
     private transient BufferedMutator mutator;
     private final String tableName;
 
+    // Stats
+    private final Aggregator<Long, Long> mutationsCounter;
+
     public CloudBigtableSingleTableBufferedWriteFn(CloudBigtableTableConfiguration config) {
       super(config);
-      this.tableName = config.getTableId();
+      tableName = config.getTableId();
+      mutationsCounter = createAggregator("mutations", new Sum.SumLongFn());
     }
 
     private synchronized BufferedMutator getBufferedMutator(Context context)
@@ -770,11 +776,11 @@ public class CloudBigtableIO {
     @Override
     public void processElement(ProcessContext context) throws Exception {
       Mutation mutation = context.element();
-      incrementOperationCounter();
       if (DOFN_LOG.isTraceEnabled()) {
         DOFN_LOG.trace("Persisting {}", Bytes.toStringBinary(mutation.getRow()));
       }
       getBufferedMutator(context).mutate(mutation);
+      mutationsCounter.addValue(1L);
     }
 
     /**
@@ -803,15 +809,21 @@ public class CloudBigtableIO {
    */
   public static class CloudBigtableSingleTableSerialWriteFn
       extends AbstractCloudBigtableTableDoFn<Mutation, Void> {
-    // Enable the use of this class instead of the buffered mutator one.
+    // Enables the use of this class instead of the buffered mutator one.
     public static final String DO_SERIAL_WRITES = "google.bigtable.dataflow.singletable.serial";
+
     private static final long serialVersionUID = 2L;
     private transient Table table;
     private final String tableId;
 
+    // Stats
+    private final Aggregator<Long, Long> mutationsCounter;
+
     public CloudBigtableSingleTableSerialWriteFn(CloudBigtableTableConfiguration config) {
       super(config);
-      this.tableId = config.getTableId();
+      tableId = config.getTableId();
+
+      mutationsCounter = createAggregator("mutations", new Sum.SumLongFn());
     }
 
     private synchronized Table getTable() throws IOException {
@@ -826,8 +838,6 @@ public class CloudBigtableIO {
      */
     @Override
     public void processElement(ProcessContext context) throws Exception {
-      incrementOperationCounter();
-
       Mutation mutation = context.element();
       if (DOFN_LOG.isTraceEnabled()) {
         DOFN_LOG.trace("Persisting {}", Bytes.toStringBinary(mutation.getRow()));
@@ -840,6 +850,8 @@ public class CloudBigtableIO {
       } else {
         throw new IllegalArgumentException("Encountered unsupported mutation type: " + mutation.getClass());
       }
+
+      mutationsCounter.addValue(1L);
     }
 
     /**
@@ -875,8 +887,13 @@ public class CloudBigtableIO {
   AbstractCloudBigtableTableDoFn<KV<String, Iterable<Mutation>>, Void> {
     private static final long serialVersionUID = 2L;
 
+    // Stats
+    private final Aggregator<Long, Long> mutationsCounter;
+
     public CloudBigtableMultiTableWriteFn(CloudBigtableConfiguration config) {
       super(config);
+
+      mutationsCounter = createAggregator("mutations", new Sum.SumLongFn());
     }
 
     /**
@@ -894,8 +911,8 @@ public class CloudBigtableIO {
       try (Table t = getConnection().getTable(TableName.valueOf(tableName))) {
         List<Mutation> mutations = Lists.newArrayList(element.getValue());
         int mutationCount = mutations.size();
-        incrementOperationCounter(mutationCount);
         t.batch(mutations, new Object[mutationCount]);
+        mutationsCounter.addValue((long) mutationCount);
       } catch (RetriesExhaustedWithDetailsException exception) {
         logExceptions(context, exception);
         retrowException(exception);
@@ -968,7 +985,7 @@ public class CloudBigtableIO {
    */
    public static PTransform<PCollection<KV<String, Iterable<Mutation>>>, PDone>
       writeToMultipleTables(CloudBigtableConfiguration config) {
-    validate(config, null);
+    validate(config);
     return new CloudBigtableWriteTransform<>(new CloudBigtableMultiTableWriteFn(config));
   }
 
@@ -999,23 +1016,25 @@ public class CloudBigtableIO {
   }
 
   private static void validate(CloudBigtableConfiguration configuration, String tableId) {
+    validate(configuration);
+    checkNotNullOrEmpty(tableId, "tableid");
+    if (BigtableSession.isAlpnProviderEnabled()) {
+      try (BigtableConnection conn = new BigtableConnection(configuration.toHBaseConfig());
+          Admin admin = conn.getAdmin()) {
+        Preconditions.checkState(admin.tableExists(TableName.valueOf(tableId)), "Table "
+            + tableId + " does not exist.  This dataflow operation could not be run.");
+      } catch (IOException | IllegalArgumentException | ExceptionInInitializerError e) {
+        LOG.error(String.format("Could not validate that the table exists: %s (%s)", e.getClass()
+              .getName(), e.getMessage()), e);
+      }
+    } else {
+      LOG.info("ALPN is not configured. Skipping table existence check.");
+    }
+  }
+
+  private static void validate(CloudBigtableConfiguration configuration) {
     checkNotNullOrEmpty(configuration.getProjectId(), "projectId");
     checkNotNullOrEmpty(configuration.getZoneId(), "zoneId");
     checkNotNullOrEmpty(configuration.getClusterId(), "clusterId");
-    if (tableId != null) {
-      checkNotNullOrEmpty(tableId, "tableid");
-      if (BigtableSession.isAlpnProviderEnabled()) {
-        try (BigtableConnection conn = new BigtableConnection(configuration.toHBaseConfig());
-            Admin admin = conn.getAdmin()) {
-          Preconditions.checkState(admin.tableExists(TableName.valueOf(tableId)), "Table "
-              + tableId + " does not exist.  This dataflow operation could not be run.");
-        } catch (IOException | IllegalArgumentException | ExceptionInInitializerError e) {
-          LOG.error(String.format("Could not validate that the table exists: %s (%s)", e.getClass()
-              .getName(), e.getMessage()), e);
-        }
-      } else {
-        LOG.info("ALPN is not configured. Skipping table existence check.");
-      }
-    }
   }
 }
