@@ -740,11 +740,13 @@ public class CloudBigtableIO {
 
     // Stats
     private final Aggregator<Long, Long> mutationsCounter;
+    private final Aggregator<Long, Long> exceptionsCounter;
 
     public CloudBigtableSingleTableBufferedWriteFn(CloudBigtableTableConfiguration config) {
       super(config);
       tableName = config.getTableId();
       mutationsCounter = createAggregator("mutations", new Sum.SumLongFn());
+      exceptionsCounter = createAggregator("exceptions", new Sum.SumLongFn());
     }
 
     private synchronized BufferedMutator getBufferedMutator(Context context)
@@ -793,6 +795,7 @@ public class CloudBigtableIO {
           mutator.close();
         }
       } catch (RetriesExhaustedWithDetailsException exception) {
+        exceptionsCounter.addValue((long) exception.getCauses().size());
         logExceptions(context, exception);
         retrowException(exception);
       } finally {
