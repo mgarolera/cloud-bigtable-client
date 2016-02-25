@@ -143,7 +143,7 @@ public class CloudBigtableIO {
   private static Logger LOG = LoggerFactory.getLogger(CloudBigtableIO.class);
 
   /**
-   * Performs a {@link ResultScanner#next()} or {@link ResultScanner#next(int)}.  It also checks if 
+   * Performs a {@link ResultScanner#next()} or {@link ResultScanner#next(int)}.  It also checks if
    * the {@link ResultOutputType} marks the last value in the {@ResultScan}.
    *
    * @param <ResultOutputType> is either a {@link Result} or {@link Result}[];
@@ -748,7 +748,6 @@ public class CloudBigtableIO {
         BufferedMutatorParams params =
             new BufferedMutatorParams(TableName.valueOf(tableName)).writeBufferSize(
               AsyncExecutor.ASYNC_MUTATOR_MAX_MEMORY_DEFAULT).listener(listener);
-        DOFN_LOG.debug("Creating the Bigtable bufferedMutator.");
         mutator = getConnection().getBufferedMutator(params);
       }
       return mutator;
@@ -785,7 +784,6 @@ public class CloudBigtableIO {
     public void finishBundle(Context context) throws Exception {
       try {
         if (mutator != null) {
-          DOFN_LOG.debug("Closing the BufferedMutator.");
           mutator.close();
         }
       } catch (RetriesExhaustedWithDetailsException exception) {
@@ -897,9 +895,7 @@ public class CloudBigtableIO {
         List<Mutation> mutations = Lists.newArrayList(element.getValue());
         int mutationCount = mutations.size();
         incrementOperationCounter(mutationCount);
-        DOFN_LOG.debug("Persisting {} elements to table {}.", mutationCount, tableName);
         t.batch(mutations, new Object[mutationCount]);
-        DOFN_LOG.debug("Finished persisting {} elements to table {}.", mutationCount, tableName);
       } catch (RetriesExhaustedWithDetailsException exception) {
         logExceptions(context, exception);
         retrowException(exception);
